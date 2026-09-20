@@ -260,6 +260,77 @@ class OmniRuntime:
             "cached": True,
         }
 
+    def create_designed_voice_profile(
+        self,
+        *,
+        voice_id: str,
+        instruct: str,
+        sample_text: str,
+        language: str | None,
+        replace: bool = False,
+        num_step: int = 32,
+        speed: float = 1.0,
+    ) -> dict:
+        self._require_ready_model()
+        normalized = self._validate_voice_id(voice_id)
+        design_prompt = str(instruct or "").strip()
+        seed_text = str(sample_text or "").strip()
+        if not design_prompt:
+            raise ValueError("instruct is required")
+        if not seed_text:
+            raise ValueError("sample_text is required")
+        if language is not None and language not in SUPPORTED_LANGUAGES:
+            raise ValueError(f"unsupported qualification language: {language}")
+
+        path = self._voice_path(normalized)
+        if path.exists() and not replace:
+            raise FileExistsError(f"voice profile already exists: {normalized}")
+
+        tmp_profile = path.with_suffix(".pt.tmp")
+        seed_path = settings.voices_dir / f".seed-{normalized}.wav"
+        with self._inference_lock:
+            audio = self.model.generate(
+                text=seed_text,
+                language=language,
+                instruct=design_prompt,
+                num_step=int(num_step),
+                speed=float(speed),
+            )
+            if not audio:
+                raise RuntimeError("model returned no designed seed audio")
+            array = np.asarray(audio[0], dtype=np.float32).reshape(-1)
+            if array.size == 0:
+                raise RuntimeError("model returned an empty designed seed audio array")
+            sf.write(
+                seed_path,
+                array,
+                int(self.model.sampling_rate),
+                subtype="PCM_16",
+            )
+            prompt = self.model.create_voice_clone_prompt(
+                ref_audio=str(seed_path),
+                ref_text=seed_text,
+            )
+            prompt.save(str(tmp_profile))
+            tmp_profile.replace(path)
+
+        with self._state_lock:
+            self._voice_cache[normalized] = prompt
+
+        return {
+            "voice_id": normalized,
+            "profile_type": "designed",
+            "bytes": path.stat().st_size,
+            "design_prompt": design_prompt,
+            "sample_text": seed_text,
+            "language": language,
+            "num_step": int(num_step),
+            "speed": float(speed),
+            "seed_audio_path": str(seed_path),
+            "seed_audio_seconds": array.size / float(self.model.sampling_rate),
+            "cached": True,
+        }
+
     def import_voice_profile(
         self, *, voice_id: str, source_path: Path, replace: bool = False
     ) -> dict:
