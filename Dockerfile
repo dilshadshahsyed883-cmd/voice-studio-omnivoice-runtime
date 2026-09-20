@@ -2,7 +2,7 @@ FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG OMNIVOICE_COMMIT=5ba967c4d5b0f08244ae856b033eea583d1e4517
-ARG APP_VERSION=0.1.0
+ARG APP_VERSION=0.1.1
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -75,8 +75,7 @@ PY
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-  CMD curl -fsS http://127.0.0.1:8000/healthz >/dev/null || exit 1
+HEALTHCHECK NONE
 
 LABEL org.opencontainers.image.title="Voice Studio OmniVoice Runtime" \
       org.opencontainers.image.version="$APP_VERSION" \

@@ -22,5 +22,9 @@ jobs:
         run: python -m compileall -q app scripts
       - name: Verify standalone verifier import path
         run: python scripts/verify_model.py --help
+      - name: Verify Docker image has no embedded healthcheck
+        run: |
+          grep -qx 'HEALTHCHECK NONE' Dockerfile
+          ! grep -q '^HEALTHCHECK --' Dockerfile
       - name: Run CPU-safe tests
         run: PYTHONPATH=. pytest -q tests
