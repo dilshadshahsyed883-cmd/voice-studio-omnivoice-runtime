@@ -42,6 +42,7 @@ class VoiceProfileCreateRequest(BaseModel):
 class VoiceProfileImportRequest(BaseModel):
     voice_id: str = Field(min_length=1, max_length=128)
     profile_b64: str = Field(min_length=1)
+    metadata: dict | None = None
     replace: bool = False
 
 
@@ -213,6 +214,16 @@ def list_voices(_: None = Depends(require_token)) -> dict:
     return {"voices": runtime.list_voice_profiles()}
 
 
+@app.get("/v1/voices/{voice_id}")
+def get_voice(voice_id: str, _: None = Depends(require_token)) -> dict:
+    try:
+        return runtime.voice_profile_info(voice_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @app.post("/v1/voices")
 async def create_voice(
     request: VoiceProfileCreateRequest, _: None = Depends(require_token)
@@ -267,6 +278,7 @@ async def import_voice(
             voice_id=request.voice_id,
             source_path=temp_path,
             replace=request.replace,
+            metadata=request.metadata,
         )
     except FileExistsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -291,6 +303,7 @@ def export_voice(voice_id: str, _: None = Depends(require_token)) -> dict:
         "voice_id": voice_id,
         "sha256": hashlib.sha256(raw).hexdigest(),
         "profile_b64": base64.b64encode(raw).decode("ascii"),
+        "metadata": runtime.voice_profile_info(voice_id),
     }
 
 
