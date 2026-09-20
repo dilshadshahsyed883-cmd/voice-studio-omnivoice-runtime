@@ -25,7 +25,6 @@ def test_validate_voice_id_accepts_safe_ids(voice_id: str) -> None:
     "voice_id",
     [
         "",
-        " has-space",
         "has space",
         "../escape",
         "slash/name",
@@ -35,6 +34,10 @@ def test_validate_voice_id_accepts_safe_ids(voice_id: str) -> None:
 def test_validate_voice_id_rejects_unsafe_ids(voice_id: str) -> None:
     with pytest.raises(ValueError):
         OmniRuntime._validate_voice_id(voice_id)
+
+
+def test_validate_voice_id_trims_outer_whitespace() -> None:
+    assert OmniRuntime._validate_voice_id("  voice-001  ") == "voice-001"
 
 
 def test_voice_profile_path_and_exists(tmp_path, monkeypatch) -> None:
