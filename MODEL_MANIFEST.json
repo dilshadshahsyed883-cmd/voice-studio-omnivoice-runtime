@@ -1,0 +1,17 @@
+{
+  "model_id": "k2-fsa/OmniVoice",
+  "revision": "18db15024ce4b7e15638be6ef0e283d99d282f39",
+  "expected_sampling_rate": 24000,
+  "critical_files": {
+    "model.safetensors": {
+      "sha256": "730839316de585f4c8298ec0e1712efc10fb19c6fa4e36eb741cb8d51ebcf6aa",
+      "size": 2450344112
+    },
+    "audio_tokenizer/model.safetensors": {
+      "sha256": "fe7c5e8785e0a05833e1bfc3e002ec7f55af21e306b2e7154a448c1f54ccfb0d"
+    },
+    "tokenizer.json": {
+      "sha256": "408f669b7e2b045fdf54201d815bd364e6667dbd845115da81239c40bc6dcfd1"
+    }
+  }
+}
