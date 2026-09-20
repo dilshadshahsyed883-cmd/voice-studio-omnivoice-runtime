@@ -60,9 +60,9 @@ class OmniRuntime:
                     f"omnivoice version mismatch: {package_version} != "
                     f"{settings.expected_package_version}"
                 )
-            if torchaudio_version != settings.expected_torchaudio_version:
+            if not torchaudio_version.startswith(settings.expected_torchaudio_version):
                 raise RuntimeError(
-                    f"torchaudio version mismatch: {torchaudio_version} != "
+                    f"torchaudio version mismatch: {torchaudio_version} does not start with "
                     f"{settings.expected_torchaudio_version}"
                 )
             if transformers_version != settings.expected_transformers_version:

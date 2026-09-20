@@ -62,7 +62,7 @@ import importlib.metadata as md
 import torch
 assert md.version("omnivoice") == "0.2.1", md.version("omnivoice")
 assert torch.__version__.startswith("2.8.0"), torch.__version__
-assert md.version("torchaudio") == "2.8.0", md.version("torchaudio")
+assert md.version("torchaudio").startswith("2.8.0"), md.version("torchaudio")
 assert md.version("transformers") == "5.3.0", md.version("transformers")
 assert str(torch.version.cuda).startswith("12.8"), torch.version.cuda
 print("omnivoice", md.version("omnivoice"))
