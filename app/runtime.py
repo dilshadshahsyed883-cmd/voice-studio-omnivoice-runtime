@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.metadata
 import platform
+import re
 import threading
 import time
 from pathlib import Path
@@ -34,6 +35,7 @@ class OmniRuntime:
         self.last_smoke: dict | None = None
         self._inference_lock = threading.Lock()
         self._state_lock = threading.Lock()
+        self._voice_cache: dict[str, Any] = {}
 
     def initialize(self) -> None:
         with self._state_lock:
@@ -177,6 +179,110 @@ class OmniRuntime:
         base["gpu"] = gpu
         return base
 
+    @staticmethod
+    def _validate_voice_id(voice_id: str) -> str:
+        normalized = str(voice_id or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", normalized):
+            raise ValueError(
+                "voice_id must be 1-128 characters using letters, numbers, _ or -"
+            )
+        return normalized
+
+    def _voice_path(self, voice_id: str) -> Path:
+        normalized = self._validate_voice_id(voice_id)
+        return settings.voices_dir / f"{normalized}.pt"
+
+    def list_voice_profiles(self) -> list[dict]:
+        profiles: list[dict] = []
+        for path in sorted(settings.voices_dir.glob("*.pt")):
+            profiles.append(
+                {
+                    "voice_id": path.stem,
+                    "bytes": path.stat().st_size,
+                    "cached": path.stem in self._voice_cache,
+                }
+            )
+        return profiles
+
+    def load_voice_profile(self, voice_id: str) -> Any:
+        normalized = self._validate_voice_id(voice_id)
+        with self._state_lock:
+            cached = self._voice_cache.get(normalized)
+        if cached is not None:
+            return cached
+
+        path = self._voice_path(normalized)
+        if not path.is_file():
+            raise FileNotFoundError(f"voice profile not found: {normalized}")
+
+        from omnivoice import VoiceClonePrompt
+
+        prompt = VoiceClonePrompt.load(str(path), map_location="cpu")
+        with self._state_lock:
+            self._voice_cache[normalized] = prompt
+        return prompt
+
+    def create_voice_profile(
+        self, *, voice_id: str, ref_audio: Path, ref_text: str
+    ) -> dict:
+        self._require_ready_model()
+        normalized = self._validate_voice_id(voice_id)
+        transcript = str(ref_text or "").strip()
+        if not transcript:
+            raise ValueError("ref_text is required because runtime ASR is disabled")
+
+        path = self._voice_path(normalized)
+        tmp_path = path.with_suffix(".pt.tmp")
+        with self._inference_lock:
+            prompt = self.model.create_voice_clone_prompt(
+                ref_audio=str(ref_audio), ref_text=transcript
+            )
+            prompt.save(str(tmp_path))
+            tmp_path.replace(path)
+
+        with self._state_lock:
+            self._voice_cache[normalized] = prompt
+
+        return {
+            "voice_id": normalized,
+            "bytes": path.stat().st_size,
+            "ref_text_characters": len(transcript),
+            "cached": True,
+        }
+
+    def import_voice_profile(self, *, voice_id: str, source_path: Path) -> dict:
+        normalized = self._validate_voice_id(voice_id)
+        from omnivoice import VoiceClonePrompt
+
+        prompt = VoiceClonePrompt.load(str(source_path), map_location="cpu")
+        destination = self._voice_path(normalized)
+        tmp_path = destination.with_suffix(".pt.tmp")
+        tmp_path.write_bytes(source_path.read_bytes())
+        tmp_path.replace(destination)
+        with self._state_lock:
+            self._voice_cache[normalized] = prompt
+        return {
+            "voice_id": normalized,
+            "bytes": destination.stat().st_size,
+            "cached": True,
+        }
+
+    def export_voice_profile(self, voice_id: str) -> bytes:
+        path = self._voice_path(voice_id)
+        if not path.is_file():
+            raise FileNotFoundError(f"voice profile not found: {voice_id}")
+        return path.read_bytes()
+
+    def delete_voice_profile(self, voice_id: str) -> bool:
+        normalized = self._validate_voice_id(voice_id)
+        path = self._voice_path(normalized)
+        existed = path.is_file()
+        if existed:
+            path.unlink()
+        with self._state_lock:
+            self._voice_cache.pop(normalized, None)
+        return existed
+
     def generate(
         self,
         *,
@@ -186,6 +292,7 @@ class OmniRuntime:
         language: str | None,
         ref_audio: Path | None = None,
         ref_text: str | None = None,
+        voice_id: str | None = None,
         instruct: str | None = None,
         num_step: int = 32,
         speed: float = 1.0,
@@ -201,8 +308,8 @@ class OmniRuntime:
             )
         if mode not in {"clone", "auto", "design"}:
             raise ValueError(f"unsupported mode: {mode}")
-        if mode == "clone" and (ref_audio is None or not ref_text):
-            raise ValueError("clone mode requires ref_audio and ref_text")
+        if mode == "clone" and not voice_id and (ref_audio is None or not ref_text):
+            raise ValueError("clone mode requires voice_id or ref_audio + ref_text")
         if mode == "design" and not instruct:
             raise ValueError("design mode requires instruct")
 
@@ -211,13 +318,16 @@ class OmniRuntime:
         if not spoken_chunks:
             raise ValueError("text contains no speakable content")
 
+        clone_prompt = None
+        if mode == "clone" and voice_id:
+            clone_prompt = self.load_voice_profile(voice_id)
+
         started = time.perf_counter()
         torch = self.torch
         pieces: list[np.ndarray] = []
 
         with self._inference_lock:
-            clone_prompt = None
-            if mode == "clone":
+            if mode == "clone" and clone_prompt is None:
                 clone_prompt = self.model.create_voice_clone_prompt(
                     ref_audio=str(ref_audio), ref_text=ref_text
                 )
@@ -265,6 +375,7 @@ class OmniRuntime:
             "status": "passed",
             "mode": mode,
             "language": language,
+            "voice_id": voice_id if mode == "clone" else None,
             "input_characters": len(text),
             "split_chunks": len(chunks),
             "spoken_chunks": len(spoken_chunks),
