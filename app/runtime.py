@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.metadata
+import json
 import platform
 import re
 import threading
@@ -194,19 +195,46 @@ class OmniRuntime:
         normalized = self._validate_voice_id(voice_id)
         return settings.voices_dir / f"{normalized}.pt"
 
+    def _voice_meta_path(self, voice_id: str) -> Path:
+        normalized = self._validate_voice_id(voice_id)
+        return settings.voices_dir / f"{normalized}.json"
+
+    def _write_voice_metadata(self, voice_id: str, metadata: dict[str, Any]) -> None:
+        path = self._voice_meta_path(voice_id)
+        tmp_path = path.with_suffix(".json.tmp")
+        tmp_path.write_text(
+            json.dumps(metadata, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        tmp_path.replace(path)
+
+    def voice_profile_info(self, voice_id: str) -> dict:
+        normalized = self._validate_voice_id(voice_id)
+        profile_path = self._voice_path(normalized)
+        if not profile_path.is_file():
+            raise FileNotFoundError(f"voice profile not found: {normalized}")
+        info = {
+            "voice_id": normalized,
+            "bytes": profile_path.stat().st_size,
+            "cached": normalized in self._voice_cache,
+        }
+        meta_path = self._voice_meta_path(normalized)
+        if meta_path.is_file():
+            try:
+                metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+                if isinstance(metadata, dict):
+                    info.update(metadata)
+            except Exception:
+                info["metadata_error"] = "invalid metadata sidecar"
+        return info
+
     def voice_profile_exists(self, voice_id: str) -> bool:
         return self._voice_path(voice_id).is_file()
 
     def list_voice_profiles(self) -> list[dict]:
         profiles: list[dict] = []
         for path in sorted(settings.voices_dir.glob("*.pt")):
-            profiles.append(
-                {
-                    "voice_id": path.stem,
-                    "bytes": path.stat().st_size,
-                    "cached": path.stem in self._voice_cache,
-                }
-            )
+            profiles.append(self.voice_profile_info(path.stem))
         return profiles
 
     def load_voice_profile(self, voice_id: str) -> Any:
@@ -255,12 +283,16 @@ class OmniRuntime:
         with self._state_lock:
             self._voice_cache[normalized] = prompt
 
-        return {
-            "voice_id": normalized,
-            "bytes": path.stat().st_size,
+        now = time.time()
+        metadata = {
+            "profile_type": "cloned",
+            "ref_text": transcript,
             "ref_text_characters": len(transcript),
-            "cached": True,
+            "created_at": now,
+            "updated_at": now,
         }
+        self._write_voice_metadata(normalized, metadata)
+        return self.voice_profile_info(normalized)
 
     def create_design_preview(
         self,
@@ -350,15 +382,21 @@ class OmniRuntime:
             ref_text=preview["sample_text"],
             replace=replace,
         )
-        profile.update(
+        current = self.voice_profile_info(voice_id)
+        created_at = current.get("created_at", time.time())
+        self._write_voice_metadata(
+            voice_id,
             {
                 "profile_type": "designed",
                 "design_prompt": preview["instruct"],
-                "design_preview_id": preview_id,
+                "sample_text": preview["sample_text"],
                 "language": preview["language"],
-            }
+                "design_preview_id": preview_id,
+                "created_at": created_at,
+                "updated_at": time.time(),
+            },
         )
-        return profile
+        return self.voice_profile_info(voice_id)
 
     def delete_design_preview(self, preview_id: str) -> bool:
         with self._state_lock:
@@ -368,79 +406,13 @@ class OmniRuntime:
         Path(preview["audio_path"]).unlink(missing_ok=True)
         return True
 
-    def create_designed_voice_profile(
+    def import_voice_profile(
         self,
         *,
         voice_id: str,
-        instruct: str,
-        sample_text: str,
-        language: str | None,
+        source_path: Path,
         replace: bool = False,
-        num_step: int = 32,
-        speed: float = 1.0,
-    ) -> dict:
-        self._require_ready_model()
-        normalized = self._validate_voice_id(voice_id)
-        design_prompt = str(instruct or "").strip()
-        seed_text = str(sample_text or "").strip()
-        if not design_prompt:
-            raise ValueError("instruct is required")
-        if not seed_text:
-            raise ValueError("sample_text is required")
-        if language is not None and language not in SUPPORTED_LANGUAGES:
-            raise ValueError(f"unsupported qualification language: {language}")
-
-        path = self._voice_path(normalized)
-        if path.exists() and not replace:
-            raise FileExistsError(f"voice profile already exists: {normalized}")
-
-        tmp_profile = path.with_suffix(".pt.tmp")
-        seed_path = settings.voices_dir / f".seed-{normalized}.wav"
-        with self._inference_lock:
-            audio = self.model.generate(
-                text=seed_text,
-                language=language,
-                instruct=design_prompt,
-                num_step=int(num_step),
-                speed=float(speed),
-            )
-            if not audio:
-                raise RuntimeError("model returned no designed seed audio")
-            array = np.asarray(audio[0], dtype=np.float32).reshape(-1)
-            if array.size == 0:
-                raise RuntimeError("model returned an empty designed seed audio array")
-            sf.write(
-                seed_path,
-                array,
-                int(self.model.sampling_rate),
-                subtype="PCM_16",
-            )
-            prompt = self.model.create_voice_clone_prompt(
-                ref_audio=str(seed_path),
-                ref_text=seed_text,
-            )
-            prompt.save(str(tmp_profile))
-            tmp_profile.replace(path)
-
-        with self._state_lock:
-            self._voice_cache[normalized] = prompt
-
-        return {
-            "voice_id": normalized,
-            "profile_type": "designed",
-            "bytes": path.stat().st_size,
-            "design_prompt": design_prompt,
-            "sample_text": seed_text,
-            "language": language,
-            "num_step": int(num_step),
-            "speed": float(speed),
-            "seed_audio_path": str(seed_path),
-            "seed_audio_seconds": array.size / float(self.model.sampling_rate),
-            "cached": True,
-        }
-
-    def import_voice_profile(
-        self, *, voice_id: str, source_path: Path, replace: bool = False
+        metadata: dict[str, Any] | None = None,
     ) -> dict:
         normalized = self._validate_voice_id(voice_id)
         from omnivoice import VoiceClonePrompt
@@ -454,11 +426,15 @@ class OmniRuntime:
         tmp_path.replace(destination)
         with self._state_lock:
             self._voice_cache[normalized] = prompt
-        return {
-            "voice_id": normalized,
-            "bytes": destination.stat().st_size,
-            "cached": True,
-        }
+        if metadata:
+            safe_metadata = dict(metadata)
+            safe_metadata.pop("voice_id", None)
+            safe_metadata.pop("bytes", None)
+            safe_metadata.pop("cached", None)
+            safe_metadata["updated_at"] = time.time()
+            safe_metadata.setdefault("created_at", safe_metadata["updated_at"])
+            self._write_voice_metadata(normalized, safe_metadata)
+        return self.voice_profile_info(normalized)
 
     def export_voice_profile(self, voice_id: str) -> bytes:
         path = self._voice_path(voice_id)
@@ -472,6 +448,7 @@ class OmniRuntime:
         existed = path.is_file()
         if existed:
             path.unlink()
+        self._voice_meta_path(normalized).unlink(missing_ok=True)
         with self._state_lock:
             self._voice_cache.pop(normalized, None)
         return existed
