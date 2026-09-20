@@ -2,7 +2,7 @@ FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG OMNIVOICE_COMMIT=5ba967c4d5b0f08244ae856b033eea583d1e4517
-ARG APP_VERSION=0.1.1
+ARG APP_VERSION=0.1.2
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -83,4 +83,4 @@ LABEL org.opencontainers.image.title="Voice Studio OmniVoice Runtime" \
       ai.omnivoice.upstream.commit="$OMNIVOICE_COMMIT" \
       ai.omnivoice.model.revision="18db15024ce4b7e15638be6ef0e283d99d282f39"
 
-CMD ["/opt/venv/bin/python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+CMD ["/opt/venv/bin/python", "-m", "uvicorn", "app.main:app", "--host", "::", "--port", "8000", "--workers", "1"]
