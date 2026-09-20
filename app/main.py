@@ -45,6 +45,19 @@ class VoiceProfileImportRequest(BaseModel):
     replace: bool = False
 
 
+class VoiceDesignPreviewRequest(BaseModel):
+    instruct: str = Field(min_length=1)
+    sample_text: str = Field(min_length=1, max_length=500)
+    language: Literal["hi", "mr", "gu", "bn", "arb"] | None = None
+    num_step: int = Field(default=32, ge=8, le=64)
+    speed: float = Field(default=1.0, ge=0.5, le=2.0)
+
+
+class VoiceDesignApproveRequest(BaseModel):
+    voice_id: str = Field(min_length=1, max_length=128)
+    replace: bool = False
+
+
 async def require_token(authorization: str | None = Header(default=None)) -> None:
     if not settings.api_token:
         return
@@ -126,6 +139,73 @@ async def rerun_smoke(_: None = Depends(require_token)) -> dict:
     if not runtime.ready:
         raise HTTPException(status_code=503, detail=runtime.error or "runtime not ready")
     return await asyncio.to_thread(runtime.run_smoke)
+
+
+@app.post("/v1/voice-design/previews")
+async def create_voice_design_preview(
+    request: VoiceDesignPreviewRequest, _: None = Depends(require_token)
+) -> dict:
+    if not runtime.ready:
+        raise HTTPException(status_code=503, detail=runtime.error or "runtime not ready")
+    try:
+        preview = await asyncio.to_thread(
+            runtime.create_design_preview,
+            instruct=request.instruct,
+            sample_text=request.sample_text,
+            language=request.language,
+            num_step=request.num_step,
+            speed=request.speed,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"status": "preview_ready", "preview": preview}
+
+
+@app.get("/v1/voice-design/previews/{preview_id}/audio")
+def get_voice_design_preview_audio(
+    preview_id: str, _: None = Depends(require_token)
+) -> FileResponse:
+    try:
+        preview = runtime.get_design_preview(preview_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(
+        preview["audio_path"],
+        media_type="audio/wav",
+        filename=f"voice-design-{preview_id}.wav",
+    )
+
+
+@app.post("/v1/voice-design/previews/{preview_id}/approve")
+async def approve_voice_design_preview(
+    preview_id: str,
+    request: VoiceDesignApproveRequest,
+    _: None = Depends(require_token),
+) -> dict:
+    try:
+        profile = await asyncio.to_thread(
+            runtime.approve_design_preview,
+            preview_id=preview_id,
+            voice_id=request.voice_id,
+            replace=request.replace,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"status": "approved", "profile": profile}
+
+
+@app.delete("/v1/voice-design/previews/{preview_id}")
+def delete_voice_design_preview(
+    preview_id: str, _: None = Depends(require_token)
+) -> dict:
+    deleted = runtime.delete_design_preview(preview_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"design preview not found: {preview_id}")
+    return {"status": "deleted", "preview_id": preview_id}
 
 
 @app.get("/v1/voices")
