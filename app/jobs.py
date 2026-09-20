@@ -76,22 +76,31 @@ class JobManager:
         ref_path: Path | None = None
 
         if mode == "clone":
-            ref_text = str(payload.get("ref_text") or "").strip()
-            ref_audio_b64 = str(payload.get("ref_audio_b64") or "")
-            if not ref_text:
-                raise ValueError("clone mode requires ref_text; runtime ASR is intentionally disabled")
-            if not ref_audio_b64:
-                raise ValueError("clone mode requires ref_audio_b64")
-            try:
-                raw = base64.b64decode(ref_audio_b64, validate=True)
-            except Exception as exc:
-                raise ValueError(f"invalid base64 reference audio: {exc}") from exc
-            if len(raw) > 20 * 1024 * 1024:
-                raise ValueError("reference WAV exceeds 20 MiB")
-            ref_path = job_dir / "reference.wav"
-            ref_path.write_bytes(raw)
-            payload["reference_validation"] = validate_reference_wav(ref_path)
-            payload["ref_audio_b64"] = "<stored>"
+            voice_id = str(payload.get("voice_id") or "").strip()
+            if voice_id:
+                runtime._validate_voice_id(voice_id)
+                payload["voice_id"] = voice_id
+                payload["ref_audio_b64"] = None
+                payload["ref_text"] = None
+            else:
+                ref_text = str(payload.get("ref_text") or "").strip()
+                ref_audio_b64 = str(payload.get("ref_audio_b64") or "")
+                if not ref_text:
+                    raise ValueError(
+                        "clone mode requires voice_id or ref_text; runtime ASR is intentionally disabled"
+                    )
+                if not ref_audio_b64:
+                    raise ValueError("clone mode requires voice_id or ref_audio_b64")
+                try:
+                    raw = base64.b64decode(ref_audio_b64, validate=True)
+                except Exception as exc:
+                    raise ValueError(f"invalid base64 reference audio: {exc}") from exc
+                if len(raw) > 20 * 1024 * 1024:
+                    raise ValueError("reference WAV exceeds 20 MiB")
+                ref_path = job_dir / "reference.wav"
+                ref_path.write_bytes(raw)
+                payload["reference_validation"] = validate_reference_wav(ref_path)
+                payload["ref_audio_b64"] = "<stored>"
         elif mode == "design" and not str(payload.get("instruct") or "").strip():
             raise ValueError("design mode requires instruct")
 
@@ -133,6 +142,7 @@ class JobManager:
                     language=request.get("language"),
                     ref_audio=Path(job.ref_path) if job.ref_path else None,
                     ref_text=request.get("ref_text"),
+                    voice_id=request.get("voice_id"),
                     instruct=request.get("instruct"),
                     num_step=int(request.get("num_step", 32)),
                     speed=float(request.get("speed", 1.0)),
