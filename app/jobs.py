@@ -79,6 +79,8 @@ class JobManager:
             voice_id = str(payload.get("voice_id") or "").strip()
             if voice_id:
                 runtime._validate_voice_id(voice_id)
+                if not runtime.voice_profile_exists(voice_id):
+                    raise ValueError(f"voice profile not found: {voice_id}")
                 payload["voice_id"] = voice_id
                 payload["ref_audio_b64"] = None
                 payload["ref_text"] = None
