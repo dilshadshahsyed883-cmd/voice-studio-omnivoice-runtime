@@ -192,6 +192,9 @@ class OmniRuntime:
         normalized = self._validate_voice_id(voice_id)
         return settings.voices_dir / f"{normalized}.pt"
 
+    def voice_profile_exists(self, voice_id: str) -> bool:
+        return self._voice_path(voice_id).is_file()
+
     def list_voice_profiles(self) -> list[dict]:
         profiles: list[dict] = []
         for path in sorted(settings.voices_dir.glob("*.pt")):
@@ -223,7 +226,12 @@ class OmniRuntime:
         return prompt
 
     def create_voice_profile(
-        self, *, voice_id: str, ref_audio: Path, ref_text: str
+        self,
+        *,
+        voice_id: str,
+        ref_audio: Path,
+        ref_text: str,
+        replace: bool = False,
     ) -> dict:
         self._require_ready_model()
         normalized = self._validate_voice_id(voice_id)
@@ -232,6 +240,8 @@ class OmniRuntime:
             raise ValueError("ref_text is required because runtime ASR is disabled")
 
         path = self._voice_path(normalized)
+        if path.exists() and not replace:
+            raise FileExistsError(f"voice profile already exists: {normalized}")
         tmp_path = path.with_suffix(".pt.tmp")
         with self._inference_lock:
             prompt = self.model.create_voice_clone_prompt(
@@ -250,12 +260,16 @@ class OmniRuntime:
             "cached": True,
         }
 
-    def import_voice_profile(self, *, voice_id: str, source_path: Path) -> dict:
+    def import_voice_profile(
+        self, *, voice_id: str, source_path: Path, replace: bool = False
+    ) -> dict:
         normalized = self._validate_voice_id(voice_id)
         from omnivoice import VoiceClonePrompt
 
         prompt = VoiceClonePrompt.load(str(source_path), map_location="cpu")
         destination = self._voice_path(normalized)
+        if destination.exists() and not replace:
+            raise FileExistsError(f"voice profile already exists: {normalized}")
         tmp_path = destination.with_suffix(".pt.tmp")
         tmp_path.write_bytes(source_path.read_bytes())
         tmp_path.replace(destination)
