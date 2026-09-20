@@ -18,6 +18,7 @@ class Settings:
     model_dir: Path = Path(os.getenv("OMNIVOICE_MODEL_DIR", "/opt/models/omnivoice"))
     manifest_path: Path = Path(os.getenv("OMNIVOICE_MANIFEST", "/app/MODEL_MANIFEST.json"))
     jobs_dir: Path = Path(os.getenv("OMNIVOICE_JOBS_DIR", "/tmp/omnivoice/jobs"))
+    voices_dir: Path = Path(os.getenv("OMNIVOICE_VOICES_DIR", "/tmp/omnivoice/voices"))
     api_token: str = os.getenv("OMNIVOICE_API_TOKEN", "")
     min_vram_gb: float = float(os.getenv("OMNIVOICE_MIN_VRAM_GB", "20"))
     expected_package_version: str = os.getenv("OMNIVOICE_EXPECTED_VERSION", "0.2.1")
@@ -32,3 +33,4 @@ class Settings:
 
 settings = Settings()
 settings.jobs_dir.mkdir(parents=True, exist_ok=True)
+settings.voices_dir.mkdir(parents=True, exist_ok=True)
