@@ -5,6 +5,7 @@ import platform
 import re
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,7 @@ class OmniRuntime:
         self._inference_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._voice_cache: dict[str, Any] = {}
+        self._design_previews: dict[str, dict[str, Any]] = {}
 
     def initialize(self) -> None:
         with self._state_lock:
@@ -259,6 +261,112 @@ class OmniRuntime:
             "ref_text_characters": len(transcript),
             "cached": True,
         }
+
+    def create_design_preview(
+        self,
+        *,
+        instruct: str,
+        sample_text: str,
+        language: str | None,
+        num_step: int = 32,
+        speed: float = 1.0,
+    ) -> dict:
+        self._require_ready_model()
+        design_prompt = str(instruct or "").strip()
+        seed_text = str(sample_text or "").strip()
+        if not design_prompt:
+            raise ValueError("instruct is required")
+        if not seed_text:
+            raise ValueError("sample_text is required")
+        if language is not None and language not in SUPPORTED_LANGUAGES:
+            raise ValueError(f"unsupported qualification language: {language}")
+
+        preview_id = uuid.uuid4().hex
+        preview_path = settings.design_previews_dir / f"{preview_id}.wav"
+        started = time.perf_counter()
+
+        with self._inference_lock:
+            audio = self.model.generate(
+                text=seed_text,
+                language=language,
+                instruct=design_prompt,
+                num_step=int(num_step),
+                speed=float(speed),
+            )
+            if not audio:
+                raise RuntimeError("model returned no designed preview audio")
+            array = np.asarray(audio[0], dtype=np.float32).reshape(-1)
+            if array.size == 0:
+                raise RuntimeError("model returned an empty designed preview audio array")
+            sf.write(
+                preview_path,
+                array,
+                int(self.model.sampling_rate),
+                subtype="PCM_16",
+            )
+            if self.torch.cuda.is_available():
+                self.torch.cuda.synchronize()
+
+        synthesis_seconds = time.perf_counter() - started
+        duration_seconds = array.size / float(self.model.sampling_rate)
+        preview = {
+            "preview_id": preview_id,
+            "instruct": design_prompt,
+            "sample_text": seed_text,
+            "language": language,
+            "num_step": int(num_step),
+            "speed": float(speed),
+            "duration_seconds": duration_seconds,
+            "synthesis_seconds": synthesis_seconds,
+            "rtf": synthesis_seconds / duration_seconds if duration_seconds > 0 else None,
+            "created_at": time.time(),
+            "audio_path": str(preview_path),
+        }
+        with self._state_lock:
+            self._design_previews[preview_id] = preview
+        return {k: v for k, v in preview.items() if k != "audio_path"}
+
+    def get_design_preview(self, preview_id: str) -> dict:
+        with self._state_lock:
+            preview = self._design_previews.get(str(preview_id))
+        if preview is None:
+            raise FileNotFoundError(f"design preview not found: {preview_id}")
+        path = Path(preview["audio_path"])
+        if not path.is_file():
+            raise FileNotFoundError(f"design preview audio not found: {preview_id}")
+        return dict(preview)
+
+    def approve_design_preview(
+        self,
+        *,
+        preview_id: str,
+        voice_id: str,
+        replace: bool = False,
+    ) -> dict:
+        preview = self.get_design_preview(preview_id)
+        profile = self.create_voice_profile(
+            voice_id=voice_id,
+            ref_audio=Path(preview["audio_path"]),
+            ref_text=preview["sample_text"],
+            replace=replace,
+        )
+        profile.update(
+            {
+                "profile_type": "designed",
+                "design_prompt": preview["instruct"],
+                "design_preview_id": preview_id,
+                "language": preview["language"],
+            }
+        )
+        return profile
+
+    def delete_design_preview(self, preview_id: str) -> bool:
+        with self._state_lock:
+            preview = self._design_previews.pop(str(preview_id), None)
+        if preview is None:
+            return False
+        Path(preview["audio_path"]).unlink(missing_ok=True)
+        return True
 
     def create_designed_voice_profile(
         self,
