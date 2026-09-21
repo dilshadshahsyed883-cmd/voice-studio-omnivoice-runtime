@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.metadata
 import json
 import platform
@@ -31,6 +32,7 @@ class OmniRuntime:
         self.loading = False
         self.error: str | None = None
         self.started_at = time.time()
+        self.instance_id = uuid.uuid4().hex
         self.loaded_at: float | None = None
         self.load_seconds: float | None = None
         self.manifest_report: dict | None = None
@@ -143,6 +145,9 @@ class OmniRuntime:
             "loading": self.loading,
             "error": self.error,
             "process_uptime_seconds": time.time() - self.started_at,
+            "instance_id": self.instance_id,
+            "voice_profiles": len(list(settings.voices_dir.glob("*.pt"))),
+            "design_previews": len(list(settings.design_previews_dir.glob("*.json"))),
             "loaded_at": self.loaded_at,
             "load_seconds": self.load_seconds,
             "python": platform.python_version(),
@@ -199,6 +204,32 @@ class OmniRuntime:
         normalized = self._validate_voice_id(voice_id)
         return settings.voices_dir / f"{normalized}.json"
 
+    @staticmethod
+    def _validate_preview_id(preview_id: str) -> str:
+        normalized = str(preview_id or "").strip().lower()
+        if not re.fullmatch(r"[a-f0-9]{32}", normalized):
+            raise ValueError("preview_id must be a 32-character hexadecimal id")
+        return normalized
+
+    def _design_preview_meta_path(self, preview_id: str) -> Path:
+        normalized = self._validate_preview_id(preview_id)
+        return settings.design_previews_dir / f"{normalized}.json"
+
+    def _design_preview_audio_path(self, preview_id: str) -> Path:
+        normalized = self._validate_preview_id(preview_id)
+        return settings.design_previews_dir / f"{normalized}.wav"
+
+    def _persist_design_preview(self, preview: dict[str, Any]) -> None:
+        preview_id = self._validate_preview_id(str(preview["preview_id"]))
+        path = self._design_preview_meta_path(preview_id)
+        tmp_path = path.with_suffix(".json.tmp")
+        public = {k: v for k, v in preview.items() if k != "audio_path"}
+        tmp_path.write_text(
+            json.dumps(public, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        tmp_path.replace(path)
+
     def _write_voice_metadata(self, voice_id: str, metadata: dict[str, Any]) -> None:
         path = self._voice_meta_path(voice_id)
         tmp_path = path.with_suffix(".json.tmp")
@@ -213,9 +244,11 @@ class OmniRuntime:
         profile_path = self._voice_path(normalized)
         if not profile_path.is_file():
             raise FileNotFoundError(f"voice profile not found: {normalized}")
+        raw = profile_path.read_bytes()
         info = {
             "voice_id": normalized,
-            "bytes": profile_path.stat().st_size,
+            "bytes": len(raw),
+            "sha256": hashlib.sha256(raw).hexdigest(),
             "cached": normalized in self._voice_cache,
         }
         meta_path = self._voice_meta_path(normalized)
@@ -262,6 +295,7 @@ class OmniRuntime:
         ref_audio: Path,
         ref_text: str,
         replace: bool = False,
+        metadata: dict[str, Any] | None = None,
     ) -> dict:
         self._require_ready_model()
         normalized = self._validate_voice_id(voice_id)
@@ -284,14 +318,28 @@ class OmniRuntime:
             self._voice_cache[normalized] = prompt
 
         now = time.time()
-        metadata = {
+        extra = dict(metadata or {})
+        for key in (
+            "voice_id",
+            "bytes",
+            "sha256",
+            "cached",
+            "profile_type",
+            "ref_text",
+            "ref_text_characters",
+            "created_at",
+            "updated_at",
+        ):
+            extra.pop(key, None)
+        profile_metadata = {
+            **extra,
             "profile_type": "cloned",
             "ref_text": transcript,
             "ref_text_characters": len(transcript),
             "created_at": now,
             "updated_at": now,
         }
-        self._write_voice_metadata(normalized, metadata)
+        self._write_voice_metadata(normalized, profile_metadata)
         return self.voice_profile_info(normalized)
 
     def create_design_preview(
@@ -314,7 +362,7 @@ class OmniRuntime:
             raise ValueError(f"unsupported qualification language: {language}")
 
         preview_id = uuid.uuid4().hex
-        preview_path = settings.design_previews_dir / f"{preview_id}.wav"
+        preview_path = self._design_preview_audio_path(preview_id)
         started = time.perf_counter()
 
         with self._inference_lock:
@@ -354,18 +402,33 @@ class OmniRuntime:
             "created_at": time.time(),
             "audio_path": str(preview_path),
         }
+        self._persist_design_preview(preview)
         with self._state_lock:
             self._design_previews[preview_id] = preview
         return {k: v for k, v in preview.items() if k != "audio_path"}
 
     def get_design_preview(self, preview_id: str) -> dict:
+        normalized = self._validate_preview_id(preview_id)
         with self._state_lock:
-            preview = self._design_previews.get(str(preview_id))
+            preview = self._design_previews.get(normalized)
         if preview is None:
-            raise FileNotFoundError(f"design preview not found: {preview_id}")
+            meta_path = self._design_preview_meta_path(normalized)
+            if not meta_path.is_file():
+                raise FileNotFoundError(f"design preview not found: {normalized}")
+            try:
+                loaded = json.loads(meta_path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                raise RuntimeError(f"invalid design preview metadata: {normalized}") from exc
+            if not isinstance(loaded, dict):
+                raise RuntimeError(f"invalid design preview metadata: {normalized}")
+            preview = dict(loaded)
+            preview["preview_id"] = normalized
+            preview["audio_path"] = str(self._design_preview_audio_path(normalized))
+            with self._state_lock:
+                self._design_previews[normalized] = preview
         path = Path(preview["audio_path"])
         if not path.is_file():
-            raise FileNotFoundError(f"design preview audio not found: {preview_id}")
+            raise FileNotFoundError(f"design preview audio not found: {normalized}")
         return dict(preview)
 
     def approve_design_preview(
@@ -399,12 +462,15 @@ class OmniRuntime:
         return self.voice_profile_info(voice_id)
 
     def delete_design_preview(self, preview_id: str) -> bool:
+        normalized = self._validate_preview_id(preview_id)
         with self._state_lock:
-            preview = self._design_previews.pop(str(preview_id), None)
-        if preview is None:
-            return False
-        Path(preview["audio_path"]).unlink(missing_ok=True)
-        return True
+            preview = self._design_previews.pop(normalized, None)
+        audio_path = self._design_preview_audio_path(normalized)
+        meta_path = self._design_preview_meta_path(normalized)
+        existed = bool(preview is not None or audio_path.is_file() or meta_path.is_file())
+        audio_path.unlink(missing_ok=True)
+        meta_path.unlink(missing_ok=True)
+        return existed
 
     def import_voice_profile(
         self,
