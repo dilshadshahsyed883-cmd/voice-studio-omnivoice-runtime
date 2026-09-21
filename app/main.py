@@ -36,6 +36,7 @@ class VoiceProfileCreateRequest(BaseModel):
     voice_id: str = Field(min_length=1, max_length=128)
     ref_audio_b64: str = Field(min_length=1)
     ref_text: str = Field(min_length=1)
+    metadata: dict | None = None
     replace: bool = False
 
 
@@ -99,6 +100,13 @@ def root() -> dict:
         "service": "voice-studio-omnivoice-runtime",
         "version": "0.1.0",
         "languages": SUPPORTED_LANGUAGES,
+        "instance_id": runtime.instance_id,
+        "capabilities": {
+            "saved_voice_profiles": True,
+            "voice_profile_import_export": True,
+            "voice_design_preview_approve": True,
+            "single_worker_queue": True,
+        },
     }
 
 
@@ -160,6 +168,22 @@ async def create_voice_design_preview(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"status": "preview_ready", "preview": preview}
+
+
+@app.get("/v1/voice-design/previews/{preview_id}")
+def get_voice_design_preview(
+    preview_id: str, _: None = Depends(require_token)
+) -> dict:
+    try:
+        preview = runtime.get_design_preview(preview_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {
+        "status": "preview_ready",
+        "preview": {k: v for k, v in preview.items() if k != "audio_path"},
+    }
 
 
 @app.get("/v1/voice-design/previews/{preview_id}/audio")
@@ -248,6 +272,7 @@ async def create_voice(
             ref_audio=temp_path,
             ref_text=request.ref_text,
             replace=request.replace,
+            metadata=request.metadata,
         )
     except FileExistsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
